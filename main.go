@@ -1,31 +1,37 @@
 package main
 
 import (
+	"cashier-api/database"
+	"cashier-api/handlers"
+	"cashier-api/models"
+	"cashier-api/repositories"
+	"cashier-api/services"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
+
+	"github.com/spf13/viper"
 )
 
-type Category struct {
-	ID          int    `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
+type Config struct {
+	Port        string `mapstructure:"APP_PORT"`
+	DatabaseURL string `mapstructure:"DB_URL"`
 }
 
-type Product struct {
-	ID    int    `json:"id"`
-	Name  string `json:"name"`
-	Price int    `json:"price"`
-	Stock int    `json:"stock"`
-}
+var (
+	config Config
+	db     *sql.DB
+)
 
-var categories = []Category{
+var categories = []models.Category{
 	{ID: 1, Name: "Makanan Utama", Description: "Hidangan porsi lengkap"},
 	{ID: 2, Name: "Minuman Berkafein", Description: "Berbagai jenis olahan kopi dan teh"},
 }
 
-var products = []Product{
+var products = []models.Product{
 	{ID: 1, Name: "Indomie Godog", Price: 3500, Stock: 10},
 	{ID: 2, Name: "Vit 100ml", Price: 3500, Stock: 40},
 }
@@ -41,7 +47,7 @@ func getCategories(w http.ResponseWriter, r *http.Request) {
 func storeCategory(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	var category Category
+	var category models.Category
 
 	err := json.NewDecoder(r.Body).Decode(&category)
 	if err != nil {
@@ -110,7 +116,7 @@ func updateCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var category Category
+	var category models.Category
 
 	err = json.NewDecoder(r.Body).Decode(&category)
 	if err != nil {
@@ -178,72 +184,6 @@ func deleteCategory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func getProducts(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	json.NewEncoder(w).Encode(map[string]any{
-		"data": categories,
-	})
-}
-
-func storeProduct(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	var product Product
-
-	err := json.NewDecoder(r.Body).Decode(&product)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-
-		json.NewEncoder(w).Encode(map[string]any{
-			"message": "Bad Request",
-		})
-
-		return
-	}
-
-	product.ID = len(products) + 1
-
-	products = append(products, product)
-
-	w.WriteHeader(http.StatusCreated)
-
-	json.NewEncoder(w).Encode(map[string]any{
-		"data": product,
-	})
-}
-
-func showProduct(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	id, err := strconv.Atoi(r.PathValue("id"))
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-
-		json.NewEncoder(w).Encode(map[string]any{
-			"message": "Invalid Product ID",
-		})
-
-		return
-	}
-
-	for _, p := range products {
-		if p.ID == id {
-			json.NewEncoder(w).Encode(map[string]any{
-				"data": p,
-			})
-
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusNotFound)
-
-	json.NewEncoder(w).Encode(map[string]any{
-		"message": "Product Not Found",
-	})
-}
-
 func updateProduct(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -258,7 +198,7 @@ func updateProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var product Product
+	var product models.Product
 
 	err = json.NewDecoder(r.Body).Decode(&product)
 	if err != nil {
@@ -326,18 +266,54 @@ func deleteProduct(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func main() {
-	http.HandleFunc("GET /api/categories", getCategories)
-	http.HandleFunc("POST /api/categories", storeCategory)
-	http.HandleFunc("GET /api/categories/{id}", showCategory)
-	http.HandleFunc("PUT /api/categories/{id}", updateCategory)
-	http.HandleFunc("DELETE /api/categories/{id}", deleteCategory)
+func initConfig() {
+	viper.SetConfigFile(".env")
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
-	http.HandleFunc("GET /api/products", getProducts)
-	http.HandleFunc("POST /api/products", storeProduct)
-	http.HandleFunc("GET /api/products/{id}", showProduct)
-	http.HandleFunc("PUT /api/products/{id}", updateProduct)
-	http.HandleFunc("DELETE /api/products/{id}", deleteProduct)
+	viper.AutomaticEnv()
+
+	err := viper.ReadInConfig()
+	if err != nil {
+		panic(fmt.Errorf("failed read config: %w", err))
+	}
+
+	viper.Unmarshal(&config)
+}
+
+func initDB() {
+	var err error
+
+	db, err = database.NewConnection(config.DatabaseURL)
+	if err != nil {
+		panic(fmt.Errorf("failed connect to database: %w", err))
+	}
+}
+
+func main() {
+	initConfig()
+	initDB()
+
+	defer db.Close()
+
+	categoryRepository := repositories.NewCategoryRepository(db)
+	categoryService := services.NewCategoryService(categoryRepository)
+	categoryHandler := handlers.NewCategoryHandler(categoryService)
+
+	productRepository := repositories.NewProductRepository(db)
+	productService := services.NewProductService(productRepository)
+	productHandler := handlers.NewProductHandler(productService, categoryService)
+
+	http.HandleFunc("GET /api/categories", categoryHandler.GetAllCategories)
+	http.HandleFunc("POST /api/categories", categoryHandler.StoreCategory)
+	http.HandleFunc("GET /api/categories/{id}", categoryHandler.ShowCategory)
+	http.HandleFunc("PUT /api/categories/{id}", categoryHandler.UpdateCategory)
+	http.HandleFunc("DELETE /api/categories/{id}", categoryHandler.DeleteCategory)
+
+	http.HandleFunc("GET /api/products", productHandler.GetAllProducts)
+	http.HandleFunc("POST /api/products", productHandler.StoreProduct)
+	http.HandleFunc("GET /api/products/{id}", productHandler.ShowProduct)
+	http.HandleFunc("PUT /api/products/{id}", productHandler.UpdateProduct)
+	http.HandleFunc("DELETE /api/products/{id}", productHandler.DeleteProduct)
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -347,9 +323,11 @@ func main() {
 		})
 	})
 
-	fmt.Println("Server running on http://localhost:8080")
+	addr := "0.0.0.0:" + config.Port
 
-	err := http.ListenAndServe(":8080", nil)
+	fmt.Printf("Server running on %s \n", addr)
+
+	err := http.ListenAndServe(addr, nil)
 	if err != nil {
 		fmt.Println("Failed running server")
 	}
